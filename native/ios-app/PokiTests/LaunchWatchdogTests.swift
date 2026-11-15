@@ -252,8 +252,8 @@ final class LaunchWatchdogTests: XCTestCase {
         XCTAssertTrue(model.setRelay("https://relay.invalid"))
         XCTAssertTrue(model.diskImage.isChecking)
 
-        // Simulate user focusing the composer or tapping a home pill while DDI verification is still running.
-        model.prepareForTask()
+        // A phone step arrives (runTool starts the session) while DDI verification is still running.
+        model.startSession()
 
         XCTAssertNil(model.problem, "Pending DDI verification must not falsely report that the disk image is not downloaded")
         XCTAssertTrue(model.sessionStarting)

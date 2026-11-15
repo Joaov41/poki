@@ -242,7 +242,6 @@ final class AppModel {
     private var handoffTimer: Timer?
     private var sessionStartTask: Task<Void, Never>?
     private(set) var sessionStarting = false
-    private var pendingPrepareForTask = false
     private let requiresDiskImageCheck: Bool
 
     /// No task is running, so an install (which ends Poki) disturbs nothing: no agent step under way,
@@ -573,16 +572,12 @@ final class AppModel {
         }
     }
 
-    /// Mounting developer services does not enable Automation Mode. A probe-driven model already
-    /// has the session the probe opened, so it starts no other.
+    /// Wakes a session that is already on for the task about to start. It never turns Poki on: a task
+    /// that stays in Poki's own pages needs no phone session, and the first phone step turns it on
+    /// (`runTool`). A probe-driven model already has the session the probe opened.
     func prepareForTask() {
-        guard automationPath == .inProcess, setup.loopback != .none, !probeDriven else { return }
-        if !sessionOn {
-            pendingPrepareForTask = true
-            startSession()
-        }
-        guard sessionOn, runnerPaused else { return }
-        pendingPrepareForTask = false
+        guard automationPath == .inProcess, setup.loopback != .none, !probeDriven,
+              sessionOn, runnerPaused else { return }
         runnerPaused = false
         host.setPaused(false)
         launchRunner()
@@ -1102,12 +1097,6 @@ final class AppModel {
         lastAgentActivity = Date()
         // Away from Poki the runner (and with it iOS's automation banner) starts only when an agent asks.
         standBy(reason: nil)
-        if pendingPrepareForTask, automationPath == .inProcess, runnerPaused, !probeDriven {
-            pendingPrepareForTask = false
-            runnerPaused = false
-            host.setPaused(false)
-            launchRunner()
-        }
         if let relay { core.start(relay: relay) }
         idleTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkIdle() } }
         openWhileInFront("turned on with Poki in front")
@@ -1175,7 +1164,6 @@ final class AppModel {
     /// The update is accepted by iOS. Keep the loopback and wantsOn for the replacement app.
     func windDownForUpdate() async {
         sessionStartTask?.cancel()
-        pendingPrepareForTask = false
         idleTimer?.invalidate(); idleTimer = nil
         sessionOn = false
         background.stop()
@@ -1199,7 +1187,6 @@ final class AppModel {
 
     func stopSession() {
         sessionStartTask?.cancel()
-        pendingPrepareForTask = false
         wantsOn = false
         if AskPoki.app === self, let chat = AskPoki.chat, chat.isRunningInSplitView { chat.stop() }
         guard sessionOn else {

@@ -542,13 +542,20 @@ final class PasscodeTests: XCTestCase {
     }
 }
 
-/// iOS asks the owner for the passcode before it allows automation, after Poki restarts and 8 hours
-/// after the last time. An in-process open that waits on it is named: Poki's home asks the owner, and
-/// the agent reads that only the owner can enter it, also after iOS gives up.
 extension InProcessWDA {
     nonisolated static func resetGate() { gate.withLock { $0 = OpenGate() } }
 }
 
+private final class RequestSnapshots: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [Bool] = []
+    var values: [Bool] { lock.withLock { seen } }
+    func add(_ value: Bool) { lock.withLock { seen.append(value) } }
+}
+
+/// iOS asks the owner for the passcode before it allows automation, after Poki restarts and 8 hours
+/// after the last time. An in-process open that waits on it is named: Poki's home asks the owner, and
+/// the agent reads that only the owner can enter it, also after iOS gives up.
 @MainActor
 final class InProcessPasscodeTests: XCTestCase {
     private var saved: (relay: String?, relayEnabled: Any?, wantsOn: Any?, startedBoot: Any?, setup: SetupState)!
@@ -851,6 +858,60 @@ final class InProcessPasscodeTests: XCTestCase {
         XCTAssertTrue(call.answer.contains("81 percent"))
         let modelInput = try JSONSerialization.data(withJSONObject: server.requests)
         XCTAssertTrue(String(decoding: modelInput, as: UTF8.self).contains("81 percent"), "the real page observation reached the model")
+    }
+
+    /// A task that starts on a web page leaves Poki off: the page needs no phone session. The first step that
+    /// has to leave Poki for another app turns Poki on at that step and reads the screen.
+    func testABrowserTaskThatNeedsAnotherAppTurnsPokiOnForThatStep() async throws {
+        let keys = ["chat.provider", "chat.customURL", "chat.customModel"]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, saved) { UserDefaults.standard.set(value, forKey: key) } }
+        let page = try PageServer(pages: ["/": "<html><head><title>Local fixture</title></head><body><p>Test capacity: 81 percent</p></body></html>"])
+        defer { PokiBrowser.shared.close() }
+        model.stopSession()
+        XCTAssertFalse(model.sessionOn)
+
+        let poweredOnAtRequest = RequestSnapshots()
+        let app = model!
+        let server = try FakeCompletions(replies: [
+            FakeCompletions.tool("report_plan", ["steps": ["Read the page", "Check Settings"], "currentStep": 1]),
+            FakeCompletions.tool("web_open", ["url": "http://127.0.0.1:\(page.port)/"]),
+            FakeCompletions.tool("look", [:]),
+            FakeCompletions.text("The page says 81 percent, and Settings is open."),
+        ], onRequest: { _ in
+            DispatchQueue.main.sync { poweredOnAtRequest.add(MainActor.assumeIsolated { app.sessionOn || app.sessionStarting }) }
+        })
+        ModelKeys.customURL = "http://127.0.0.1:\(server.port)/v1"
+        ModelKeys.customModel = "fake-model"
+        ModelKeys.selectedProvider = .custom
+        let chat = ChatModel(app: model, kind: .handoff, requester: "Test agent")
+
+        chat.send("Read the capacity on this webpage, then open Settings.")
+        let completed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !chat.running }, object: nil)
+        await fulfillment(of: [completed], timeout: 20)
+
+        XCTAssertEqual(poweredOnAtRequest.values, [false, false, false, true],
+                       "Poki stays off through the start of the task and the web page, and is on once the phone step ran")
+        let calls = chat.savedCalls
+        XCTAssertEqual(calls.map(\.name), ["report_plan", "web_open", "look"])
+        XCTAssertTrue(calls[0].ok && calls[1].ok, calls.map(\.answer).joined(separator: "\n"))
+        XCTAssertFalse(calls[2].answer.contains("sandbox browser"), "the phone step is let through to the phone")
+        XCTAssertTrue(model.sessionOn)
+    }
+
+    /// With no way to turn Poki on, the phone step is refused at once and says what to fix: the task does not wait on it.
+    func testAPhoneStepThatCannotTurnPokiOnAnswersAtOnce() async {
+        model.stopSession()
+        model.setup.loopback = .none
+        model.prepareForTask()
+        XCTAssertFalse(model.sessionOn)
+        XCTAssertFalse(model.sessionStarting, "a task start does not turn Poki on")
+
+        let answer = await model.runTool("look", arguments: "{}")
+        XCTAssertTrue(answer.isError, answer.text)
+        XCTAssertTrue(answer.text.hasPrefix("not_sent: Poki could not turn on"), answer.text)
+        XCTAssertFalse(model.sessionOn)
+        XCTAssertFalse(session.isOpen)
     }
 
     private func chatWithoutAutomation(on server: FakeCompletions, request: String) async throws -> ChatModel {

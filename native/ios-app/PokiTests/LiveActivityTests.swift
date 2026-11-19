@@ -38,7 +38,21 @@ final class LiveActivityTests: XCTestCase {
         AppLocalization.shared.preference = "en"
     }
 
-    override func tearDown() async throws { AppLocalization.shared.preference = language }
+    override func tearDown() async throws {
+        AppLocalization.shared.preference = language
+        try await bringPokiBackToTheFront()
+    }
+
+    /// A test that sent Poki to the background must not leave later suites running in a backgrounded app.
+    private func bringPokiBackToTheFront() async throws {
+        guard UIApplication.shared.applicationState != .active else { return }
+        let bundle = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        _ = await Task.detached { PKInProcess.shared().app(bundle, action: "activate") }.value
+        for _ in 0..<250 where UIApplication.shared.applicationState != .active {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(UIApplication.shared.applicationState, .active, "Poki is back in front for the next suite")
+    }
 
     func testAppWiringResumesDeferredActivityOnceInForeground() async throws {
         try await withSessionApp { app, activities in

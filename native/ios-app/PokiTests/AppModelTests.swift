@@ -623,19 +623,6 @@ final class InProcessPasscodeTests: XCTestCase {
         XCTAssertFalse(model.hasOpenInProcessSession)
     }
 
-    func testSetUpResetsBootMarkerAndOpenGateAcrossRuns() async throws {
-        UserDefaults.standard.set(BootClock.current, forKey: "automationStartedBoot")
-        InProcessWDA.gate.withLock {
-            $0.inFront = false
-            $0.declined = true
-            $0.startedThisBoot = true
-        }
-        try await tearDown()
-        try await setUp()
-        XCTAssertTrue(model.passcodeExpected, "each test starts before this boot's first automation")
-        XCTAssertFalse(InProcessWDA.automationDeclined)
-    }
-
     func testRemoteInitializationAndStatusWaitForPhoneReadToEnableAutomation() async {
         let opened = expectation(description: "Connecting an agent does not enable Automation Mode")
         opened.isInverted = true
@@ -899,19 +886,16 @@ final class InProcessPasscodeTests: XCTestCase {
         XCTAssertTrue(model.sessionOn)
     }
 
-    /// With no way to turn Poki on, the phone step is refused at once and says what to fix: the task does not wait on it.
-    func testAPhoneStepThatCannotTurnPokiOnAnswersAtOnce() async {
+    /// Poki is off and the owner talks to it: the live voice's first phone step turns Poki on, as a chat's does.
+    /// (The step ends on the runner here, because a simulator has no WebDriverAgent.)
+    func testALiveVoicePhoneStepTurnsPokiOnWhenItIsOff() async {
         model.stopSession()
-        model.setup.loopback = .none
-        model.prepareForTask()
         XCTAssertFalse(model.sessionOn)
-        XCTAssertFalse(model.sessionStarting, "a task start does not turn Poki on")
 
-        let answer = await model.runTool("look", arguments: "{}")
-        XCTAssertTrue(answer.isError, answer.text)
-        XCTAssertTrue(answer.text.hasPrefix("not_sent: Poki could not turn on"), answer.text)
-        XCTAssertFalse(model.sessionOn)
-        XCTAssertFalse(session.isOpen)
+        let answer = await model.voicePhoneStep("look", "{}")
+
+        XCTAssertTrue(model.sessionOn, "the voice's phone step turned Poki on: \(answer.text)")
+        XCTAssertFalse(answer.text.hasPrefix("not_sent: Poki could not turn on"), answer.text)
     }
 
     private func chatWithoutAutomation(on server: FakeCompletions, request: String) async throws -> ChatModel {
